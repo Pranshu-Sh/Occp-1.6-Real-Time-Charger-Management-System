@@ -1,0 +1,20 @@
+spring:
+  jpa:
+    show-sql: false
+
+logging:
+  level:
+    root: WARN
+    com.zyelectric.ocpp: INFO
+  file:
+    name: /var/log/ocpp/ocpp.log
+
+server:
+  error:
+    include-message: never
+    include-stacktrace: never
+
+management:
+  endpoint:
+    health:
+      show-details: never

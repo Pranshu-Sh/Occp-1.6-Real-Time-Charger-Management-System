@@ -1,16 +1,15 @@
 package com.zyelectric.ocpp.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.zyelectric.ocpp.cache.SessionData;
 import com.zyelectric.ocpp.dto.BootNotification;
 import com.zyelectric.ocpp.dto.MeterValues;
 import com.zyelectric.ocpp.dto.StatusNotification;
 import com.zyelectric.ocpp.dto.StopTransaction;
 import com.zyelectric.ocpp.model.ChargeBox;
 import com.zyelectric.ocpp.model.Connector;
-import com.zyelectric.ocpp.model.ConnectorStatus;
-import com.zyelectric.ocpp.model.IdTag;
 import com.zyelectric.ocpp.model.StartTransaction;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -23,16 +22,22 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
+import java.util.Set;
+import java.util.stream.Collectors;
 
-import static com.zyelectric.ocpp.cache.WebSocketSessionCache.getSessionData;
 import static com.zyelectric.ocpp.utils.CommonUtils.convertEpochToIso8601;
 
+/**
+ * Parses and dispatches OCPP-J CALL frames: {@code [2, uniqueId, action, payload]}.
+ * Every code path that fails to produce a normal CallResult responds with a
+ * spec-compliant 5-element CallError ({@code [4, uniqueId, errorCode, errorDescription, {}]})
+ * instead of silently dropping the message - a charge point should never be left waiting
+ * on a request that will never be answered.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OcppMessageProcessor {
-    private static final double DEFAULT_METER_START = 0.0;
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private final ChargerService chargerService;
     private final ConnectorService connectorService;
@@ -41,36 +46,56 @@ public class OcppMessageProcessor {
     private final StartTransactionService startTransactionService;
     private final MeterValueService meterValueService;
     private final StopTransactionService stopTransactionService;
+    private final Validator validator;
+
     public void processMessage(String chargePointName, String rawMessage, WebSocketSession session) {
+        String messageId = "-1";
         try {
             List<?> messageList = objectMapper.readValue(rawMessage, List.class);
 
             if (messageList.size() < 3) {
-                log.error("Invalid OCPP message format: {}", rawMessage);
+                sendCallError(session, messageId, "FormationViolation", "OCPP message must have at least 3 elements");
                 return;
             }
 
-            String messageId = (String) messageList.get(1);
-            String action = (String) messageList.get(2);
-
-            Map<String, Object> payload = messageList.size() > 3 ? (Map<String, Object>) messageList.get(3) : Map.of();
-            WebSocketSession cachedSession = getSessionData(chargePointName);
-
-            if (cachedSession == null) {
-                log.error("No session data found for: {}", chargePointName);
+            if (messageList.get(1) instanceof String id) {
+                messageId = id;
+            } else {
+                sendCallError(session, messageId, "FormationViolation", "UniqueId must be a string");
                 return;
             }
 
+            if (!(messageList.get(0) instanceof Integer messageTypeId) || messageTypeId != 2) {
+                sendCallError(session, messageId, "NotSupported", "Only CALL (MessageTypeId 2) is supported");
+                return;
+            }
+
+            if (!(messageList.get(2) instanceof String action)) {
+                sendCallError(session, messageId, "FormationViolation", "Action must be a string");
+                return;
+            }
+
+            Object payloadRaw = messageList.size() > 3 ? messageList.get(3) : Map.of();
+            if (!(payloadRaw instanceof Map)) {
+                sendCallError(session, messageId, "FormationViolation", "Payload must be an object");
+                return;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> payload = (Map<String, Object>) payloadRaw;
+
+            // Always answer on the session that actually delivered this message - not a
+            // fresh WebSocketSessionCache lookup by name, which can race a reconnect and
+            // route the response to the wrong physical connection.
             switch (action) {
-                case "BootNotification" -> handleBootNotification(chargePointName, cachedSession, messageId, payload);
+                case "BootNotification" -> handleBootNotification(chargePointName, session, messageId, payload);
                 case "StatusNotification" ->
-                        handleStatusNotification(chargePointName, cachedSession, messageId, payload);
-                case "Heartbeat" -> handleHeartbeat(chargePointName, cachedSession, messageId);
-                case "Authorize" -> handleAuthorize(cachedSession, messageId, payload);
+                        handleStatusNotification(chargePointName, session, messageId, payload);
+                case "Heartbeat" -> handleHeartbeat(chargePointName, session, messageId);
+                case "Authorize" -> handleAuthorize(session, messageId, payload);
                 case "StartTransaction" ->
-                        handleStartTransaction(chargePointName, cachedSession, messageId, payload);
-                case "StopTransaction" -> handleStopTransaction(cachedSession, messageId, payload);
-                case "MeterValues" -> handleMeterValues(chargePointName, cachedSession, messageId, payload);
+                        handleStartTransaction(chargePointName, session, messageId, payload);
+                case "StopTransaction" -> handleStopTransaction(session, messageId, payload);
+                case "MeterValues" -> handleMeterValues(chargePointName, session, messageId, payload);
 //                case "FirmwareStatusNotification" ->
 //                        handleFirmwareStatusNotification(chargePointName, payload, session, messageId);
 //                case "DiagnosticsStatusNotification" ->
@@ -87,16 +112,23 @@ public class OcppMessageProcessor {
 //                case "TriggerMessage" -> handleTriggerMessage(chargePointName, payload, session, messageId);
 //                case "GetDiagnostics" -> handleGetDiagnostics(chargePointName, payload, session, messageId);
 //                case "UpdateFirmware" -> handleUpdateFirmware(chargePointName, payload, session, messageId);
-                default -> log.warn("Unknown OCPP action: {}", action);
+                default -> {
+                    log.warn("Unknown OCPP action: {}", action);
+                    sendCallError(session, messageId, "NotImplemented", "Action not implemented: " + action);
+                }
             }
 
         } catch (IOException e) {
             log.error("Failed to parse OCPP message: {}", e.getMessage());
+            sendCallError(session, messageId, "FormationViolation", "Malformed JSON: " + e.getMessage());
+        } catch (Exception e) {
+            log.error("Unhandled error processing OCPP message: {}", e.getMessage(), e);
+            sendCallError(session, messageId, "InternalError", e.getMessage() == null ? "Internal error" : e.getMessage());
         }
     }
 
     private void handleBootNotification(String chargePointName, WebSocketSession session, String messageId, Map<String, Object> payload) throws IOException {
-        BootNotification bootNotification = objectMapper.convertValue(payload, BootNotification.class);
+        BootNotification bootNotification = validate(objectMapper.convertValue(payload, BootNotification.class));
         Optional<ChargeBox> chargeBox = chargerService.getChargerById(chargePointName);
         List<Object> response;
         if (chargeBox.isPresent()) {
@@ -127,18 +159,16 @@ public class OcppMessageProcessor {
     }
 
     private void handleStatusNotification(String chargePointName, WebSocketSession session, String messageId, Map<String, Object> payload) throws IOException {
-        StatusNotification statusNotification = objectMapper.convertValue(payload, StatusNotification.class);
+        StatusNotification statusNotification = validate(objectMapper.convertValue(payload, StatusNotification.class));
 
         Optional<ChargeBox> chargeBoxOpt = chargerService.getChargerById(chargePointName);
 
         if (chargeBoxOpt.isPresent()) {
             ChargeBox chargeBox = chargeBoxOpt.get();
 
-            // ✅ Register or retrieve the connector
             Optional<Connector> connectorOpt = connectorService.registerConnector(chargeBox, statusNotification);
 
             connectorOpt.ifPresent(connector -> {
-                // ✅ Save status separately
                 connectorStatusService.saveStatus(connector, statusNotification);
 
                 log.info("StatusNotification processed for Connector ID: {}, Status: {}, Error: {}",
@@ -147,15 +177,14 @@ public class OcppMessageProcessor {
                         statusNotification.getErrorCode());
             });
 
-            // ✅ Respond to CP with acknowledgment
             List<Object> response = Arrays.asList(3, messageId, Map.of());
             session.sendMessage(new TextMessage(toJsonString(response)));
         } else {
             log.warn("Unknown charger: {}", chargePointName);
-            List<Object> errorResponse = Arrays.asList(4, messageId, "Unknown charger");
-            session.sendMessage(new TextMessage(toJsonString(errorResponse)));
+            sendCallError(session, messageId, "GenericError", "Unknown charger: " + chargePointName);
         }
     }
+
     private void handleHeartbeat(String chargePointName, WebSocketSession session, String messageId) throws IOException {
         long timestamp = System.currentTimeMillis();
         Map<String, Object> responsePayload = Map.of(
@@ -167,13 +196,11 @@ public class OcppMessageProcessor {
         log.info("Sent Heartbeat response: {}", toJsonString(response));
     }
 
-    // ✅ Handle Authorize
     private void handleAuthorize(WebSocketSession session, String messageId, Map<String, Object> payload) throws IOException {
         String idTag = (String) payload.get("idTag");
 
         log.info("Authorize request received for ID Tag: {}", idTag);
 
-        // Validate the ID tag
         String status = idTagService.validateTag(idTag);
 
         Map<String, Object> authPayload = Map.of(
@@ -187,41 +214,41 @@ public class OcppMessageProcessor {
         log.info("Sent Authorize response: {}", toJsonString(response));
     }
 
-    // ✅ Handle StartTransaction
     private void handleStartTransaction(String chargePointName, WebSocketSession session,
                                         String messageId, Map<String, Object> payload) throws IOException {
         log.info("Received StartTransaction request");
-        com.zyelectric.ocpp.dto.StartTransaction startTransaction = objectMapper.convertValue(payload, com.zyelectric.ocpp.dto.StartTransaction.class);
+        com.zyelectric.ocpp.dto.StartTransaction startTransaction = validate(objectMapper.convertValue(payload, com.zyelectric.ocpp.dto.StartTransaction.class));
 
-        Optional<ChargeBox> chargeBoxOpt = chargerService.getChargerById(chargePointName);
+        ChargeBox chargeBox = chargerService.getChargerById(chargePointName)
+                .orElseThrow(() -> new IllegalArgumentException("Unknown charger: " + chargePointName));
 
+        Map<String, Object> responsePayload;
         try {
-            // Persist transaction in the database
-            StartTransaction tx = startTransactionService.startTransaction(chargeBoxOpt.get(), startTransaction);
-
-            // Prepare the response with the persisted transaction ID
-            Map<String, Object> responsePayload = Map.of(
-                    "idTagInfo", Map.of(
-                            "status", "Accepted"
-                    ),
+            StartTransaction tx = startTransactionService.startTransaction(chargeBox, startTransaction);
+            responsePayload = Map.of(
+                    "idTagInfo", Map.of("status", "Accepted"),
                     "transactionId", tx.getTransactionId()
             );
-
-            List<Object> response = Arrays.asList(3, messageId, responsePayload);
-            session.sendMessage(new TextMessage(toJsonString(response)));
-
-            log.info("Sent StartTransaction response: {}", toJsonString(response));
-
-        } catch (Exception e) {
-            log.error("Failed to process StartTransaction: {}", e.getMessage(), e);
+        } catch (IllegalStateException e) {
+            // A blocked tag or a tag at its concurrent-transaction limit is a normal OCPP
+            // authorization outcome, not a protocol error - answer with a CallResult carrying
+            // idTagInfo.status = Blocked, not a CallError.
+            log.info("StartTransaction blocked for {}: {}", chargePointName, e.getMessage());
+            responsePayload = Map.of(
+                    "idTagInfo", Map.of("status", "Blocked"),
+                    "transactionId", 0
+            );
         }
+
+        List<Object> response = Arrays.asList(3, messageId, responsePayload);
+        session.sendMessage(new TextMessage(toJsonString(response)));
+
+        log.info("Sent StartTransaction response: {}", toJsonString(response));
     }
 
-
-    // ✅ Handle StopTransaction
     private void handleStopTransaction(WebSocketSession session, String messageId, Map<String, Object> payload) throws IOException {
         log.info("Received StopTransaction request");
-        com.zyelectric.ocpp.dto.StopTransaction stopTransaction = objectMapper.convertValue(payload, StopTransaction.class);
+        StopTransaction stopTransaction = validate(objectMapper.convertValue(payload, StopTransaction.class));
         stopTransactionService.stopTransaction(stopTransaction);
         log.info("Stopping transaction for ID Tag: {}, Meter Stop: {}, Transaction ID: {}", stopTransaction.getIdTag(), stopTransaction.getMeterStop(), stopTransaction.getTransactionId());
         String status = idTagService.validateTag(stopTransaction.getIdTag());
@@ -237,20 +264,35 @@ public class OcppMessageProcessor {
     private void handleMeterValues(String chargePointName, WebSocketSession session, String messageId, Map<String, Object> payload) throws IOException {
         log.info("Received MeterValues request: {}", payload);
 
+        MeterValues meterValues = validate(objectMapper.convertValue(payload, MeterValues.class));
+        ChargeBox chargeBox = chargerService.getChargerById(chargePointName)
+                .orElseThrow(() -> new IllegalArgumentException("Unknown charger: " + chargePointName));
+
+        meterValueService.saveMeterValue(chargeBox, meterValues);
+
+        List<Object> response = Arrays.asList(3, messageId, new HashMap<>());
+        session.sendMessage(new TextMessage(toJsonString(response)));
+        log.info("Sent MeterValues acknowledgment: {}", toJsonString(response));
+    }
+
+    private <T> T validate(T dto) {
+        Set<ConstraintViolation<T>> violations = validator.validate(dto);
+        if (!violations.isEmpty()) {
+            String message = violations.stream()
+                    .map(v -> v.getPropertyPath() + " " + v.getMessage())
+                    .collect(Collectors.joining("; "));
+            throw new IllegalArgumentException(message);
+        }
+        return dto;
+    }
+
+    private void sendCallError(WebSocketSession session, String messageId, String errorCode, String errorDescription) {
         try {
-            MeterValues meterValues = objectMapper.convertValue(payload, MeterValues.class);
-            Optional<ChargeBox> chargeBox = chargerService.getChargerById(chargePointName);
-
-            meterValueService.saveMeterValue(chargeBox.get(), meterValues);
-
-            List<Object> response = Arrays.asList(3, messageId, new HashMap<>());
-            session.sendMessage(new TextMessage(toJsonString(response)));
-            log.info("Sent MeterValues acknowledgment: {}", toJsonString(response));
-
-        } catch (Exception e) {
-            log.error("Failed to process MeterValues", e);
-            List<Object> errorResponse = Arrays.asList(4, messageId, "InternalError", e.getMessage(), new HashMap<>());
+            List<Object> errorResponse = Arrays.asList(4, messageId, errorCode, errorDescription, Map.of());
             session.sendMessage(new TextMessage(toJsonString(errorResponse)));
+            log.warn("Sent CallError [{}] for {}: {}", errorCode, messageId, errorDescription);
+        } catch (IOException e) {
+            log.error("Failed to send CallError to session: {}", e.getMessage());
         }
     }
 

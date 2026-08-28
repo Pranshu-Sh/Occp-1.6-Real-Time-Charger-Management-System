@@ -6,6 +6,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
 
 @Data
@@ -44,5 +45,9 @@ public class ChargeBox {
 
     @Column(name = "status")
     private String status;
+
+    @JsonIgnore
+    @Column(name = "password_hash")
+    private String passwordHash;
 
 }

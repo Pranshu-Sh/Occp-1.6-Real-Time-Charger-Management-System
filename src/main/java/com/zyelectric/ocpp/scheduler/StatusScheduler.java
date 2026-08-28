@@ -1,5 +1,6 @@
 package com.zyelectric.ocpp.scheduler;
 
+import com.zyelectric.ocpp.cache.WebSocketSessionCache;
 import com.zyelectric.ocpp.model.ChargeBox;
 import com.zyelectric.ocpp.repository.ChargeBoxRepository;
 import com.zyelectric.ocpp.repository.ConnectorStatusRepository;
@@ -8,7 +9,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.WebSocketSession;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -37,13 +41,32 @@ public class StatusScheduler {
         log.info("Found {} inactive chargers. Marking as Unavailable...", inactiveChargers.size());
 
         for (ChargeBox charger : inactiveChargers) {
-            if (charger.getStatus().equals("Unavailable")) {
+            if (!"Unavailable".equals(charger.getStatus())) {
                 charger.setStatus("Unavailable");
                 chargeBoxRepository.save(charger);
+                evictStaleSession(charger.getChargeBoxId());
 
                 log.info("Marked charger '{}' as Unavailable due to inactivity.", charger.getChargeBoxId());
             }
 
+        }
+    }
+
+    private void evictStaleSession(String chargeBoxId) {
+        WebSocketSession session = WebSocketSessionCache.getSessionData(chargeBoxId);
+        if (session != null) {
+            try {
+                if (session.isOpen()) {
+                    session.close(CloseStatus.GOING_AWAY);
+                }
+            } catch (IOException e) {
+                log.warn("Failed to close stale session for {}: {}", chargeBoxId, e.getMessage());
+            } finally {
+                // Conditional remove: don't evict a newer session that reconnected between
+                // the lookup above and this close, closing session's own afterConnectionClosed
+                // callback will already have cleaned that one up correctly.
+                WebSocketSessionCache.removeSession(chargeBoxId, session);
+            }
         }
     }
 

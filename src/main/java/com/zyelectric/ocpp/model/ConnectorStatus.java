@@ -2,6 +2,7 @@ package com.zyelectric.ocpp.model;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -22,7 +23,7 @@ public class ConnectorStatus {
     @Column(name = "status_id")    // ✅ Unique ID for each status row
     private Long id;
 
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "connector_id", referencedColumnName = "connector_pk", nullable = false)
     private Connector connector;
 

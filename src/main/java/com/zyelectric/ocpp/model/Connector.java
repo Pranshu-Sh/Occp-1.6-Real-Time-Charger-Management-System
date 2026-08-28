@@ -13,7 +13,7 @@ public class Connector {
     @Column(name = "connector_pk")
     private Integer id;
 
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "charge_box_id", referencedColumnName = "charge_box_id", nullable = false)
     private ChargeBox chargeBox;
 

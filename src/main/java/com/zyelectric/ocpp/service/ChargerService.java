@@ -19,7 +19,7 @@ public interface ChargerService {
 
     void updateStatus(String chargeBoxId, String status);
 
-    void preRegisterCharger(String charger);
+    void preRegisterCharger(String charger, String rawPassword);
 
     Optional<ChargeBox> getChargerBySerialNumber(String serialNumber);
 

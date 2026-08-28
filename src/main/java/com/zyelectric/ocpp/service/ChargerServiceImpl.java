@@ -5,6 +5,7 @@ import com.zyelectric.ocpp.model.ChargeBox;
 import com.zyelectric.ocpp.repository.ChargeBoxRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -16,6 +17,7 @@ import java.util.Optional;
 public class ChargerServiceImpl implements ChargerService {
 
     private final ChargeBoxRepository chargeBoxRepository;
+    private final PasswordEncoder passwordEncoder;
 
     @Override
     public Optional<ChargeBox> registerCharger(String chargePointName, BootNotification dto) {
@@ -67,7 +69,7 @@ public class ChargerServiceImpl implements ChargerService {
     }
 
     @Override
-    public void preRegisterCharger(String charger) {
+    public void preRegisterCharger(String charger, String rawPassword) {
         if (chargeBoxRepository.findByChargeBoxId(charger).isPresent()) {
             throw new IllegalArgumentException("Charger already pre-registered!");
         }
@@ -75,6 +77,7 @@ public class ChargerServiceImpl implements ChargerService {
         chargeBox.setChargeBoxId(charger);
         chargeBox.setRegistrationStatus("Pending");
         chargeBox.setStatus("Unavailable");
+        chargeBox.setPasswordHash(passwordEncoder.encode(rawPassword));
         chargeBoxRepository.save(chargeBox);
     }
 

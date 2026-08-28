@@ -6,45 +6,39 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class WebSocketSessionCache {
 
-    // ✅ Store both WebSocketSession + TransactionContext in a single map
     private static final ConcurrentHashMap<String, WebSocketSession> SESSION_MAP = new ConcurrentHashMap<>();
 
     private WebSocketSessionCache() {
         // Private constructor to prevent instantiation
     }
 
-    /**
-     * Adds a WebSocket session along with a transaction context to the cache.
-     *
-     * @param chargePointName the charge point name
-     * @param session         the WebSocket session
-     */
     public static void addSession(String chargePointName, WebSocketSession session) {
         SESSION_MAP.put(chargePointName, session);
     }
 
     /**
-     * Removes a WebSocket session and transaction context from the cache.
-     *
-     * @param chargePointName the charge point name
+     * Removes whatever session is currently cached for this charger, unconditionally.
+     * Prefer {@link #removeSession(String, WebSocketSession)} when closing a specific
+     * connection - this variant can delete a healthy reconnected session's entry if a
+     * stale connection's close event arrives late.
      */
     public static void removeSession(String chargePointName) {
         SESSION_MAP.remove(chargePointName);
     }
 
     /**
-     * Gets the session data (WebSocket + TransactionContext) by charge point name.
-     *
-     * @param chargePointName the charge point name
-     * @return the SessionData or null if not found
+     * Removes the cached session only if it is still exactly this instance - a session
+     * whose close event arrives after the charger has already reconnected (a new session
+     * registered under the same name) will not evict the new, live session.
      */
-    public static WebSocketSession  getSessionData(String chargePointName) {
+    public static void removeSession(String chargePointName, WebSocketSession session) {
+        SESSION_MAP.remove(chargePointName, session);
+    }
+
+    public static WebSocketSession getSessionData(String chargePointName) {
         return SESSION_MAP.get(chargePointName);
     }
 
-    /**
-     * Clears all sessions.
-     */
     public static void clearAllSessions() {
         SESSION_MAP.clear();
     }

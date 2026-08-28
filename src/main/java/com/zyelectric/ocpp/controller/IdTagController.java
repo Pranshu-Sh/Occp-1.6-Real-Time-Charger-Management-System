@@ -3,6 +3,7 @@ package com.zyelectric.ocpp.controller;
 import com.zyelectric.ocpp.model.IdTag;
 import com.zyelectric.ocpp.request.IdTagRequest;
 import com.zyelectric.ocpp.service.IdTagService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -17,7 +18,7 @@ public class IdTagController {
     private final IdTagService idTagService;
 
     @PostMapping
-    public ResponseEntity<IdTag> saveTag(@RequestBody IdTagRequest request) {
+    public ResponseEntity<IdTag> saveTag(@Valid @RequestBody IdTagRequest request) {
         IdTag savedTag = idTagService.saveTag(request);
         return ResponseEntity.ok(savedTag);
     }

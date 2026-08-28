@@ -1,93 +1,77 @@
 package com.zyelectric.ocpp.handler;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zyelectric.ocpp.cache.WebSocketSessionCache;
 import com.zyelectric.ocpp.service.OcppMessageProcessor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 
 import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
+/**
+ * Each WebSocket session gets its own single-thread executor, so messages from the same
+ * charger are always processed strictly in the order they arrive (FIFO), while different
+ * chargers' messages still run fully in parallel across sessions. This replaces a previous
+ * shared-thread-pool + manual queue design that could run two "drain" tasks for the same
+ * charger concurrently, racing on message order, and could spin a thread indefinitely if a
+ * session closed mid-drain.
+ */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class OcppWebSocketConnectionHandler implements WebSocketHandler {
 
-    private static final ObjectMapper objectMapper = new ObjectMapper();
     private final OcppMessageProcessor messageProcessor;
-    private final ThreadPoolTaskExecutor executor;  // ✅ Your 100-thread pool
-
-    // Map to store message queues per charge point
-    private final Map<String, Queue<String>> messageQueues = new ConcurrentHashMap<>();
+    private final Map<String, ExecutorService> sessionExecutors = new ConcurrentHashMap<>();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-        executor.execute(() -> {
-            String chargePointName = getChargePointName(session);
+        String chargePointName = getChargePointName(session);
+        if (chargePointName == null) {
+            log.error("No charge point name found. Closing session.");
+            closeSession(session, CloseStatus.BAD_DATA);
+            return;
+        }
 
-            if (chargePointName == null) {
-                log.error("No charge point name found. Closing session.");
-                closeSession(session, CloseStatus.BAD_DATA);
-                return;
-            }
+        WebSocketSessionCache.addSession(chargePointName, session);
+        sessionExecutors.put(session.getId(),
+                Executors.newSingleThreadExecutor(r -> new Thread(r, "ws-" + chargePointName)));
 
-            WebSocketSessionCache.addSession(chargePointName, session);
-
-            // Create a message queue for this charge point if it doesn't exist
-            messageQueues.putIfAbsent(chargePointName, new ConcurrentLinkedQueue<>());
-
-            log.info("OCPP connection established for {}", chargePointName);
-        });
+        log.info("OCPP connection established for {}", chargePointName);
     }
 
     @Override
     public void handleMessage(WebSocketSession session, WebSocketMessage<?> message) {
-        executor.execute(() -> {
-            String requestMessage = (String) message.getPayload();
-            String chargePointName = getChargePointName(session);
+        String chargePointName = getChargePointName(session);
+        if (chargePointName == null) {
+            log.error("Charge point name not found. Closing session.");
+            closeSession(session, CloseStatus.BAD_DATA);
+            return;
+        }
 
-            if (chargePointName == null) {
-                log.error("Charge point name not found. Closing session.");
-                closeSession(session, CloseStatus.BAD_DATA);
-                return;
-            }
+        ExecutorService executor = sessionExecutors.get(session.getId());
+        if (executor == null) {
+            log.warn("No executor registered for session {} (charger {}); dropping message.", session.getId(), chargePointName);
+            return;
+        }
 
+        String requestMessage = (String) message.getPayload();
+        executor.submit(() -> {
             log.info("Received message from {}: {}", chargePointName, requestMessage);
-
-            // Queue the message and process the queue sequentially
-            messageQueues.get(chargePointName).add(requestMessage);
-            processMessageQueue(chargePointName, session);
-        });
-    }
-
-    private void processMessageQueue(String chargePointName, WebSocketSession session) {
-        executor.execute(() -> {
-            Queue<String> queue = messageQueues.get(chargePointName);
-
-            if (queue == null || queue.isEmpty()) {
-                return;
-            }
-
-            while (!queue.isEmpty()) {
-                String message = queue.poll();
-                if (message != null) {
-
-                    if (session.isOpen()) {
-                        messageProcessor.processMessage(chargePointName, message, session);
-                        log.info("Sent message to {}: {}", chargePointName, message);
-                    } else {
-                        log.warn("Session closed. Requeuing message.");
-                        queue.add(message);
-                    }
-                }
+            try {
+                messageProcessor.processMessage(chargePointName, requestMessage, session);
+            } catch (Exception e) {
+                // OcppMessageProcessor already answers every message with a CallResult/CallError;
+                // this is a last-resort guard so one bad message can never kill this session's
+                // processing thread and silently stop future messages from being handled.
+                log.error("Unhandled error processing message from {}: {}", chargePointName, e.getMessage(), e);
             }
         });
     }
@@ -95,31 +79,31 @@ public class OcppWebSocketConnectionHandler implements WebSocketHandler {
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) {
         log.error("Transport error: {}", exception.getMessage());
-        executor.execute(() -> closeSession(session, CloseStatus.SERVER_ERROR));
+        closeSession(session, CloseStatus.SERVER_ERROR);
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus closeStatus) {
-        executor.execute(() -> {
-            String chargePointName = getChargePointName(session);
+        String chargePointName = getChargePointName(session);
+        if (chargePointName != null) {
+            log.info("Connection closed for {} - status: {}", chargePointName, closeStatus);
+            // Conditional remove: if this charger already reconnected under a new session
+            // before this (possibly late/stale) close event arrived, don't evict the live one.
+            WebSocketSessionCache.removeSession(chargePointName, session);
+        }
 
-            if (chargePointName != null) {
-                log.info("Connection closed for {} - status: {}", chargePointName, closeStatus);
-
-                try {
-                    if (session.isOpen()) {
-                        session.close(CloseStatus.NORMAL);
-                        log.info("Force closed stale session for {}", chargePointName);
-                    }
-                } catch (IOException e) {
-                    log.warn("Failed to force close session for {}: {}", chargePointName, e.getMessage());
+        ExecutorService executor = sessionExecutors.remove(session.getId());
+        if (executor != null) {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
                 }
-
-                WebSocketSessionCache.removeSession(chargePointName);
-                messageQueues.remove(chargePointName);  // Cleanup queue
-                log.info("Removed session and message queue for {}", chargePointName);
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
             }
-        });
+        }
     }
 
     @Override

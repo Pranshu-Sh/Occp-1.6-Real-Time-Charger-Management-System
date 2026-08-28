@@ -8,6 +8,7 @@ import com.zyelectric.ocpp.repository.StartTransactionRepository;
 import com.zyelectric.ocpp.repository.StopTransactionRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
 
@@ -21,14 +22,15 @@ public class StopTransactionService {
     private final IdTagService idTagService;
     private final StartTransactionRepository startTransactionRepository;
 
+    @Transactional
     public void stopTransaction(com.zyelectric.ocpp.dto.StopTransaction stopTransaction) {
 
-        Optional<StartTransaction> startTransaction = Optional.ofNullable(startTransactionRepository
+        StartTransaction startTransaction = startTransactionRepository
                 .findByTransactionId(stopTransaction.getTransactionId())
                 .orElseThrow(() -> new IllegalArgumentException(
-                        "No active StartTransaction found for idTag: " + stopTransaction.getTransactionId())));
+                        "No StartTransaction found for transactionId: " + stopTransaction.getTransactionId()));
 
-        Connector connector = startTransaction.get().getConnector();
+        Connector connector = startTransaction.getConnector();
         StopTransaction tx = new StopTransaction();
         tx.setTransactionId(stopTransaction.getTransactionId());
         tx.setConnector(connector);
@@ -39,10 +41,10 @@ public class StopTransactionService {
         stopTransactionRepository.save(tx);
 
         Optional<IdTag> tag = idTagService.getTagById(stopTransaction.getIdTag());
-
-        tag.get().setInTransaction(false);
-
-        idTagService.updateTag(tag.get());
+        if (tag.isPresent()) {
+            tag.get().setInTransaction(false);
+            idTagService.updateTag(tag.get());
+        }
     }
 
 }

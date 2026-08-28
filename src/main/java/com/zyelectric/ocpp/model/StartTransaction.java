@@ -16,11 +16,11 @@ public class StartTransaction {
     @Column(name = "transaction_id", nullable = false, unique = true)
     private Integer transactionId;
 
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "id_tag", referencedColumnName = "id_tag", nullable = false)
     private IdTag idTag;
 
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "connector_id", referencedColumnName = "connector_pk", nullable = false)
     private Connector connector;
 

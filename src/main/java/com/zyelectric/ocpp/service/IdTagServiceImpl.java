@@ -1,7 +1,7 @@
 package com.zyelectric.ocpp.service;
 
-import com.zyelectric.ocpp.dao.IdTagDao;
 import com.zyelectric.ocpp.model.IdTag;
+import com.zyelectric.ocpp.repository.IdTagRepository;
 import com.zyelectric.ocpp.request.IdTagRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,7 +15,7 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class IdTagServiceImpl implements IdTagService {
 
-    private final IdTagDao idTagDao;
+    private final IdTagRepository idTagRepository;
 
     @Override
     public IdTag saveTag(IdTagRequest request) {
@@ -37,28 +37,28 @@ public class IdTagServiceImpl implements IdTagService {
         tag.setInTransaction(request.getInTransaction());
         tag.setBlocked(request.getBlocked());
 
-        return idTagDao.save(tag);
+        return idTagRepository.save(tag);
     }
 
     @Override
     public void updateTag(IdTag tag) {
-        idTagDao.save(tag);
+        idTagRepository.save(tag);
     }
 
     @Override
     public List<IdTag> getAllTags() {
-        return idTagDao.getAll();
+        return idTagRepository.findAll();
     }
 
     @Override
     public void deleteTag(IdTag tag) {
-        idTagDao.delete(tag);
+        idTagRepository.delete(tag);
         log.info("Deleted ID Tag: {}", tag.getIdTag());
     }
 
     @Override
     public Optional<IdTag> getTagById(String idTag) {
-        return idTagDao.findByIdTag(idTag);
+        return idTagRepository.findByIdTag(idTag);
     }
 
     @Override

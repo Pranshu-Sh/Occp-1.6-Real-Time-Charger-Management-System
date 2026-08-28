@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    # NON_KEYWORDS=VALUE: MeterValue.value is a legitimate column name in MySQL (production)
+    # but VALUE is a reserved word in H2, which would otherwise break schema creation here.
+    url: jdbc:h2:mem:testdb;MODE=MySQL;DB_CLOSE_DELAY=-1;NON_KEYWORDS=VALUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  flyway:
+    enabled: false
+
+app:
+  jwt:
+    secret: test-only-secret-key-for-junit-do-not-use-in-production-0123456789abcdef
+    expiration-ms: 3600000
+  admin:
+    username: admin
+    # Placeholder only - tests that exercise login override this via @DynamicPropertySource
+    # with a hash generated from a real PasswordEncoder bean at test runtime.
+    password-hash: "$2a$10$placeholderplaceholderplaceholderplaceholderplacehol"
+  allowed-origins: ""
